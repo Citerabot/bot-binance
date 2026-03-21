@@ -6,8 +6,8 @@ from binance.exceptions import BinanceAPIException
 app = Flask(__name__)
 
 # Configuración de Binance (Usa las variables de entorno de Render)
-api_key = os.environ.get('BINANCE_API_KEY')
-api_secret = os.environ.get('BINANCE_API_SECRET')
+api_key = os.environ.get('dv1my2e5YyXWaWkHduGjw9hfonDJvKVonwIjrzkQKmYRVrmDojmgY6w1kzQEQb5G')
+api_secret = os.environ.get('4AozWEGVrx4qZU4DbG5gO8QVFBQjxrswIUbDTj4f9wCAQ90UD3M6bugKPI25IIO8')
 binance_client = Client(api_key, api_secret)
 
 @app.route('/')
