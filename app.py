@@ -1,66 +1,80 @@
-from flask import Flask, request, jsonify
-from binance.um_futures import UMFutures
-from binance.error import ClientError
-import logging
 import os
-
-# Configuración de logs para ver todo claro en Render
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from flask import Flask, request, jsonify
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
 
 app = Flask(__name__)
 
-# --- PEGA AQUÍ TUS LLAVES DE BINANCE (¡CON COMILLAS!) ---
-API_KEY = 'dv1my2e5YyXWaWkHduGjw9hfonDJvKVonwIjrzkQKmYRVrmDojmgY6w1kzQEQb5G'
-API_SECRET = '4AozWEGVrx4qZU4DbG5gO8QVFBQjxrswIUbDTj4f9wCAQ90UD3M6bugKPI25IIO8'
-
-# Conectar con Binance Futuros
-client = UMFutures(key=API_KEY, secret=API_SECRET)
+# Configuración de Binance (Usa las variables de entorno de Render)
+api_key = os.environ.get('BINANCE_API_KEY')
+api_secret = os.environ.get('BINANCE_API_SECRET')
+binance_client = Client(api_key, api_secret)
 
 @app.route('/')
-def home():
-    return "🚀 El Bot de Binance está corriendo perfectamente en Europa."
+def index():
+    return """
+    <body style="font-family:sans-serif; text-align:center; padding-top:50px; background:#121212; color:white;">
+        <h1 style="color:#02c39a;">🚀 Bot Operativo en Frankfurt</h1>
+        <p>El servidor está despierto y escuchando a TradingView.</p>
+        <div style="border:1px solid #333; display:inline-block; padding:20px; border-radius:10px;">
+            <p>Ruta del Webhook: <strong>/webhook</strong></p>
+            <p>Estado: <span style="color:#02c39a;">🟢 Online</span></p>
+        </div>
+    </body>
+    """
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    # 1. Captura de datos "Fuerza Bruta" para evitar Errores 400
+    if request.is_json:
+        data = request.get_json()
+    else:
+        # Si TradingView envía datos como texto o formulario, los convertimos
+        data = request.form.to_dict() or {}
+        if not data and request.data:
+            import json
+            try:
+                data = json.loads(request.data.decode('utf-8'))
+            except:
+                pass
+
+    print(f"--- 📥 SEÑAL RECIBIDA: {data} ---")
+
+    # 2. Extraer y limpiar variables
     try:
-        data = request.json
-        logging.info(f"--- NUEVA SEÑAL RECIBIDA ---")
-        logging.info(f"Datos recibidos desde TradingView: {data}")
-
-        # Extraer los datos de la alerta
         action = data.get('action', '').upper()
-        symbol = data.get('symbol', 'XRPUSDT')
-        quantity = data.get('quantity', 10)
+        symbol = data.get('symbol', '').upper().replace(" ", "")
+        quantity = float(data.get('quantity', 0))
+    except Exception as e:
+        print(f"❌ Error al procesar datos: {e}")
+        return jsonify({"status": "error", "message": "Datos mal formados"}), 400
 
-        # Si TradingView manda algo raro, el bot se protege
-        if action not in ['BUY', 'SELL']:
-            logging.error(f"❌ Acción no válida o vacía: {action}")
-            return jsonify({"error": "Accion invalida. Debe ser BUY o SELL"}), 400
+    # 3. Validar contenido
+    if action not in ['BUY', 'SELL'] or not symbol or quantity <= 0:
+        print(f"❌ Validación fallida: Acción={action}, Simbolo={symbol}, Cantidad={quantity}")
+        return jsonify({"status": "error", "message": "Parámetros inválidos"}), 400
 
-        # --- EJECUTAR LA ORDEN EN BINANCE ---
-        logging.info(f"Ejecutando orden: {action} {quantity} {symbol} a PRECIO DE MERCADO")
+    # 4. Ejecución en Binance con manejo de errores avanzado
+    try:
+        print(f"⚙️ Enviando orden a Binance: {action} {quantity} {symbol}...")
         
-        response = client.new_order(
+        order = binance_client.create_order(
             symbol=symbol,
             side=action,
-            type="MARKET",
+            type='MARKET',
             quantity=quantity
         )
         
-        logging.info(f"✅ ORDEN EJECUTADA CON ÉXITO. ID de Binance: {response.get('orderId')}")
-        return jsonify({"status": "success", "order_id": response.get('orderId')}), 200
+        print(f"✅ ¡ÉXITO! Orden ejecutada. ID: {order.get('orderId')}")
+        return jsonify({"status": "success", "order": order}), 200
 
-    except ClientError as e:
-        # Errores que vienen directamente de Binance (ej. saldo insuficiente)
-        logging.error(f"❌ ERROR DE BINANCE: {e.error_message}")
-        return jsonify({"error": "Error en Binance", "details": e.error_message}), 400
-        
+    except BinanceAPIException as e:
+        print(f"❌ ERROR DE BINANCE: {e.status_code} - {e.message}")
+        return jsonify({"status": "error", "message": e.message}), 400
     except Exception as e:
-        # Errores generales del servidor
-        logging.error(f"❌ ERROR INTERNO: {str(e)}")
-        return jsonify({"error": "Error interno del servidor", "details": str(e)}), 500
+        print(f"❌ ERROR INESPERADO: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    # Render asigna un puerto de forma dinámica, esta línea es OBLIGATORIA
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
