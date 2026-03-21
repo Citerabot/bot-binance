@@ -6,66 +6,63 @@ from binance.exceptions import BinanceAPIException
 
 app = Flask(__name__)
 
-# Configuración Blindada: Las llaves se cargan desde Render (Entorno)
+# CONFIGURACIÓN ELITE: Conexión optimizada con Binance
 def get_binance_client():
     api_key = os.environ.get('dv1my2e5YyXWaWkHduGjw9hfonDJvKVonwIjrzkQKmYRVrmDojmgY6w1kzQEQb5G')
     api_secret = os.environ.get('4AozWEGVrx4qZU4DbG5gO8QVFBQjxrswIUbDTj4f9wCAQ90UD3M6bugKPI25IIO8')
-    return Client(api_key, api_secret)
+    return Client(api_key, api_secret, {"timeout": 20})
 
 @app.route('/')
-def index():
+def health_check():
     return """
-    <body style="font-family:sans-serif; text-align:center; padding-top:50px; background:#0d1117; color:white;">
-        <h1 style="color:#58a6ff;">⚡ CITERABOT v3.0 SUPREME</h1>
-        <p style="font-size:1.2em;">Estado del Servidor: <span style="color:#3fb950;">🟢 ACTIVO (Frankfurt)</span></p>
-        <div style="border:1px solid #30363d; display:inline-block; padding:20px; border-radius:10px; background:#161b22;">
-            <p>Webhook URL: <code>/webhook</code></p>
-            <p>Monitoreo: <strong>XRPUSDT</strong></p>
+    <body style="font-family:sans-serif; text-align:center; background:#0b0e11; color:#ead196; padding-top:100px;">
+        <h1 style="font-size:3em; color:#f0b90b;">⚡ CITERABOT SUPREME v4.0</h1>
+        <div style="border:2px solid #f0b90b; display:inline-block; padding:30px; border-radius:15px; background:#1e2329;">
+            <p style="font-size:1.5em;">ESTADO: <span style="color:#02c39a;">● ONLINE (EUROPA)</span></p>
+            <p>Listo para ejecutar órdenes en <strong>XRPUSDT</strong></p>
         </div>
-        <p style="color:#8b949e; margin-top:20px;">Escuchando señales de TradingView en tiempo real...</p>
+        <p style="margin-top:20px; color:#707a8a;">Conectado a Binance vía API Segura</p>
     </body>
-    """
+    """, 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. RECEPTOR UNIVERSAL: Extrae datos aunque vengan mal formateados
-    data = {}
+    # 1. FUERZA BRUTA: Captura el mensaje sin importar el error de TradingView
     try:
-        # Intenta leer como JSON puro
+        # Intentamos capturar los datos de cualquier forma posible
+        raw_data = request.get_data(as_text=True)
+        print(f"📥 SEÑAL BRUTA RECIBIDA: {raw_data}")
+        
         if request.is_json:
             data = request.get_json()
         else:
-            # Si TV envía texto plano, forzamos la lectura
-            raw_content = request.data.decode('utf-8')
-            data = json.loads(raw_content)
-    except Exception:
-        # Si falla lo anterior, probamos como formulario
-        data = request.form.to_dict()
+            data = json.loads(raw_data)
+    except Exception as e:
+        # Si TradingView envía basura, intentamos rescatar los campos
+        print(f"⚠️ Formato no estándar detectado, rescatando datos...")
+        data = request.form.to_dict() or {}
 
     if not data:
-        print(f"⚠️ Webhook vacío o ilegible. Raw: {request.data}")
-        return jsonify({"error": "No data found"}), 400
+        return jsonify({"status": "error", "message": "Cuerpo vacío"}), 400
 
-    print(f"📥 SEÑAL RECIBIDA: {data}")
-
-    # 2. PROCESADOR DE ALTA PRECISIÓN (Limpia espacios y mayúsculas)
+    # 2. LIMPIEZA QUIRÚRGICA: Evita errores por espacios o minúsculas
     try:
         action = str(data.get('action', '')).strip().upper()
-        symbol = str(data.get('symbol', '')).strip().upper().replace(" ", "")
+        symbol = str(data.get('symbol', 'XRPUSDT')).strip().upper().replace(" ", "")
         quantity = float(data.get('quantity', 0))
     except Exception as e:
-        print(f"❌ Error procesando parámetros: {e}")
-        return jsonify({"error": "Invalid format"}), 400
+        print(f"❌ Error de conversión: {e}")
+        return jsonify({"status": "error", "message": "Datos numéricos inválidos"}), 400
 
-    # 3. FILTRO DE SEGURIDAD
-    if action not in ['BUY', 'SELL'] or not symbol or quantity <= 0:
-        print(f"❌ Validación fallida para: {action} {symbol} {quantity}")
-        return jsonify({"error": "Validation failed"}), 400
+    # 3. SEGURIDAD DE EJECUCIÓN
+    if action not in ['BUY', 'SELL'] or quantity <= 0:
+        print(f"❌ Validación fallida: {action} | {quantity}")
+        return jsonify({"status": "error", "message": "Instrucción incompleta"}), 400
 
-    # 4. MOTOR DE EJECUCIÓN BINANCE (Con reporte de errores detallado)
+    # 4. MOTOR DE ALTA VELOCIDAD BINANCE
     try:
         client = get_binance_client()
-        print(f"🚀 Ejecutando {action} de {quantity} {symbol} en mercado...")
+        print(f"🚀 ENVIANDO A BINANCE -> {action} {quantity} {symbol}")
         
         order = client.create_order(
             symbol=symbol,
@@ -74,17 +71,15 @@ def webhook():
             quantity=quantity
         )
         
-        print(f"✅ ¡ORDEN EXITOSA! ID: {order.get('orderId')}")
-        return jsonify({"status": "success", "order_id": order.get('orderId')}), 200
+        print(f"✅ ¡ÉXITO TOTAL! Orden ID: {order.get('orderId')}")
+        return jsonify({"status": "success", "order": order}), 200
 
     except BinanceAPIException as e:
         print(f"❌ ERROR DE BINANCE: {e.message}")
-        # Si el error es por saldo, te lo dirá claramente aquí
-        return jsonify({"error": e.message}), 400
+        return jsonify({"status": "error", "message": e.message}), 400
     except Exception as e:
-        print(f"❌ ERROR CRÍTICO DEL SISTEMA: {str(e)}")
-        return jsonify({"error": "Internal error"}), 500
+        print(f"❌ ERROR CRÍTICO: {str(e)}")
+        return jsonify({"status": "error", "message": "Fallo interno"}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
