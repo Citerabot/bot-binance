@@ -1,88 +1,62 @@
-import os
-import json
+import os, json, math, urllib.request
 from flask import Flask, request, jsonify
-import urllib.request
-ip_render = urllib.request.urlopen('https://ident.me').read().decode('utf8')
-print(f"🌐 MI DIRECCION IP DE RENDER ES: {ip_render}", flush=True)
 from binance.client import Client
 from binance.enums import *
 
 app = Flask(__name__)
 
-# Conectar con Binance usando tus variables de entorno en Render
+# Configuración Pro
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_API_SECRET')
+client = Client(API_KEY, API_SECRET)
 
-try:
-    client = Client(API_KEY, API_SECRET)
-    print("✅ Conectado a Binance correctamente", flush=True)
-except Exception as e:
-    print(f"❌ Error al conectar con Binance: {e}", flush=True)
-
-@app.route('/')
-def home():
-    return "El bot está encendido y esperando señales."
+def get_precision(symbol):
+    info = client.futures_exchange_info()
+    for s in info['symbols']:
+        if s['symbol'] == symbol:
+            return int(s['quantityPrecision'])
+    return 0
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. Recibir el paquete a la fuerza como texto (Evita el Error 400 de Flask)
     raw_data = request.get_data(as_text=True)
-    print(f"📥 SEÑAL RECIBIDA EN CRUDO: {raw_data}", flush=True)
-
     try:
-        # 2. Filtrar la basura de TradingView (Buscar las llaves { } )
-        inicio = raw_data.find('{')
-        fin = raw_data.rfind('}') + 1
+        inicio, fin = raw_data.find('{'), raw_data.rfind('}') + 1
+        data = json.loads(raw_data[inicio:fin])
         
-        if inicio == -1 or fin == 0:
-            raise ValueError("El mensaje no contiene código JSON con llaves {}")
-            
-        texto_limpio = raw_data[inicio:fin]
-        print(f"🧹 TEXTO LIMPIO EXTRAÍDO: {texto_limpio}", flush=True)
-
-        # 3. Traducir a JSON
-        data = json.loads(texto_limpio)
-        print(f"✅ JSON TRADUCIDO PERFECTO: {data}", flush=True)
-
-        # 4. Extraer los datos para Binance
-        action = data.get('action', '').upper()
-        symbol = data.get('symbol')
-        quantity = data.get('quantity')
-
-        if not symbol or not quantity:
-            print("❌ Error: Falta el símbolo o la cantidad en el mensaje.", flush=True)
-            return jsonify({"error": "Faltan datos"}), 400
-
-        print(f"🚀 ENVIANDO ORDEN A BINANCE: {action} {quantity} de {symbol}", flush=True)
-
-        # 5. Ejecutar la compra/venta en Binance
-        if action == 'BUY':
-            order = client.create_order(
-                symbol=symbol,
-                side=SIDE_BUY,
-                type=ORDER_TYPE_MARKET,
-                quantity=quantity
-            )
-        elif action == 'SELL':
-            order = client.create_order(
-                symbol=symbol,
-                side=SIDE_SELL,
-                type=ORDER_TYPE_MARKET,
-                quantity=quantity
-            )
+        action = data.get('action').upper()
+        symbol = data.get('symbol').upper()
+        
+        # --- LÓGICA DE PODER: GESTIÓN DE DINERO ---
+        # Si no mandas 'quantity', el bot usa el 50% de tu saldo disponible con 5x de palanca
+        if not data.get('quantity'):
+            balance = float(client.futures_account_balance()[1]['balance']) # Saldo USDT
+            price = float(client.futures_symbol_ticker(symbol=symbol)['price'])
+            leverage = 5
+            # Fórmula: (Saldo * Palanca) / Precio
+            raw_qty = (balance * 0.5 * leverage) / price
+            precision = get_precision(symbol)
+            quantity = round(raw_qty, precision)
         else:
-            print("❌ Error: Acción no reconocida (Debe ser BUY o SELL)", flush=True)
-            return jsonify({"error": "Acción inválida"}), 400
+            quantity = data.get('quantity')
 
-        # 6. Éxito total
-        print(f"🎉 ¡COMPRA EXITOSA EN BINANCE!: {order}", flush=True)
+        client.futures_change_leverage(symbol=symbol, leverage=5)
+
+        # Ejecución de Órdenes
+        if action == 'BUY':
+            order = client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
+        elif action == 'SELL':
+            order = client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
+        elif 'CLOSE' in action:
+            side = SIDE_SELL if 'LONG' in action else SIDE_BUY
+            order = client.futures_create_order(symbol=symbol, side=side, type=ORDER_TYPE_MARKET, quantity=quantity, reduceOnly=True)
+
+        print(f"✅ EJECUCIÓN MAESTRA: {action} {quantity} {symbol}", flush=True)
         return jsonify({"status": "success", "order": order}), 200
 
     except Exception as e:
-        print(f"❌ ERROR DURANTE EL PROCESO: {str(e)}", flush=True)
+        print(f"❌ ERROR CRÍTICO: {str(e)}", flush=True)
         return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
-    # Render usa el puerto 10000 por defecto
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
