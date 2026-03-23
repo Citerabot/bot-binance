@@ -37,7 +37,7 @@ def webhook():
         print(f"📥 SEÑAL RECIBIDA DE TRADINGVIEW: {raw_data}")
         
         # Convertimos el texto en un comando que el bot entienda
-        data = json.loads(raw_data)
+        data = request.get_json(force=True)
     except Exception as e:
         print(f"❌ Error al intentar leer el paquete: {str(e)}")
         return jsonify({"error": "No se pudo leer"}), 400
