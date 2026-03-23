@@ -1,2 +1,2 @@
 Flask
-binance-futures-connector
+python-binance
