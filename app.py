@@ -1,14 +1,21 @@
-import os, json, math, urllib.request
+import os, json, urllib.request
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
 
 app = Flask(__name__)
 
-# Configuración Pro
+# Configuración de Binance
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_API_SECRET')
 client = Client(API_KEY, API_SECRET)
+
+# Imprimir IP para Binance Whitelist
+try:
+    ip_render = urllib.request.urlopen('https://ident.me').read().decode('utf8')
+    print(f"🌐 MI DIRECCION IP DE RENDER ES: {ip_render}", flush=True)
+except:
+    pass
 
 def get_precision(symbol):
     info = client.futures_exchange_info()
@@ -17,29 +24,56 @@ def get_precision(symbol):
             return int(s['quantityPrecision'])
     return 0
 
+@app.route('/')
+def home():
+    return "Bot de FUTUROS encendido y operando al 50% de capital."
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     raw_data = request.get_data(as_text=True)
+    print(f"📥 SEÑAL RECIBIDA: {raw_data}", flush=True)
+
     try:
-        inicio, fin = raw_data.find('{'), raw_data.rfind('}') + 1
+        # Extraer JSON limpio
+        inicio = raw_data.find('{')
+        fin = raw_data.rfind('}') + 1
         data = json.loads(raw_data[inicio:fin])
         
-        action = data.get('action').upper()
-        symbol = data.get('symbol').upper()
+        action = data.get('action', '').upper()
+        symbol = data.get('symbol', '').upper()
         
-        # --- LÓGICA DE PODER: GESTIÓN DE DINERO ---
-        # Si no mandas 'quantity', el bot usa el 50% de tu saldo disponible con 5x de palanca
+        # --- EL RASTREADOR DE USDT ---
         if not data.get('quantity'):
-            balance = float(client.futures_account_balance()[1]['balance']) # Saldo USDT
+            balances = client.futures_account_balance()
+            usdt_balance = 0
+            
+            # Buscamos específicamente la moneda USDT sin importar el orden
+            for asset in balances:
+                if asset['asset'] == 'USDT':
+                    usdt_balance = float(asset['balance'])
+                    break
+            
+            print(f"💰 SALDO USDT ENCONTRADO: {usdt_balance}", flush=True)
+            
+            if usdt_balance <= 0:
+                raise ValueError("No tienes saldo USDT disponible en la billetera de Futuros.")
+
+            # Obtener precio actual
             price = float(client.futures_symbol_ticker(symbol=symbol)['price'])
+            
+            # Apalancamiento fijo en 5x
             leverage = 5
-            # Fórmula: (Saldo * Palanca) / Precio
-            raw_qty = (balance * 0.5 * leverage) / price
+            
+            # Fórmula: (Saldo * 50% * Palanca) / Precio
+            raw_qty = (usdt_balance * 0.5 * leverage) / price
             precision = get_precision(symbol)
             quantity = round(raw_qty, precision)
+            
+            print(f"🧮 CALCULANDO COMPRA: 50% de {usdt_balance} USDT a 5x = {quantity} {symbol}", flush=True)
         else:
-            quantity = data.get('quantity')
+            quantity = float(data.get('quantity'))
 
+        # Configurar apalancamiento en Binance
         client.futures_change_leverage(symbol=symbol, leverage=5)
 
         # Ejecución de Órdenes
@@ -47,11 +81,14 @@ def webhook():
             order = client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
         elif action == 'SELL':
             order = client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-        elif 'CLOSE' in action:
-            side = SIDE_SELL if 'LONG' in action else SIDE_BUY
-            order = client.futures_create_order(symbol=symbol, side=side, type=ORDER_TYPE_MARKET, quantity=quantity, reduceOnly=True)
+        elif action == 'CLOSE_LONG':
+            order = client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity, reduceOnly=True)
+        elif action == 'CLOSE_SHORT':
+            order = client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity, reduceOnly=True)
+        else:
+            raise ValueError("Acción no reconocida. Debe ser BUY, SELL, CLOSE_LONG o CLOSE_SHORT.")
 
-        print(f"✅ EJECUCIÓN MAESTRA: {action} {quantity} {symbol}", flush=True)
+        print(f"✅ EJECUCIÓN EXITOSA: {action} {quantity} {symbol}", flush=True)
         return jsonify({"status": "success", "order": order}), 200
 
     except Exception as e:
