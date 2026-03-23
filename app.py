@@ -3,7 +3,7 @@ import json
 from flask import Flask, request, jsonify
 import urllib.request
 ip_render = urllib.request.urlopen('https://ident.me').read().decode('utf8')
-print(f"🌐 MI DIRECCION IP DE RENDER ES: {ip_render}")
+print(f"🌐 MI DIRECCION IP DE RENDER ES: {ip_render}", flush=True)
 from binance.client import Client
 from binance.enums import *
 
