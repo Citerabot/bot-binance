@@ -1,6 +1,9 @@
 import os
 import json
 from flask import Flask, request, jsonify
+import urllib.request
+ip_render = urllib.request.urlopen('https://ident.me').read().decode('utf8')
+print(f"🌐 MI DIRECCION IP DE RENDER ES: {ip_render}")
 from binance.client import Client
 from binance.enums import *
 
