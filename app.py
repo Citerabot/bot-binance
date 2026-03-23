@@ -7,8 +7,8 @@ from binance.enums import *
 app = Flask(__name__)
 
 # Conectar con Binance usando tus variables de entorno en Render
-API_KEY = os.environ.get('dv1my2e5YyXWaWkHduGjw9hfonDJvKVonwIjrzkQKmYRVrmDojmgY6w1kzQEQb5G')
-API_SECRET = os.environ.get('4AozWEGVrx4qZU4DbG5gO8QVFBQjxrswIUbDTj4f9wCAQ90UD3M6bugKPI25IIO8')
+API_KEY = os.environ.get('BINANCE_API_KEY')
+API_SECRET = os.environ.get('BINANCE_API_SECRET')
 
 try:
     client = Client(API_KEY, API_SECRET)
