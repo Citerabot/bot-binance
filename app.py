@@ -5,11 +5,12 @@ from binance.enums import *
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN DE TU ESTRATEGIA CON DOBLE BLINDAJE ---
+# --- CONFIGURACIÓN ULTRA PRO: GESTIÓN DE RIESGO DINÁMICA ---
 APALANCAMIENTO = 5
-PORCENTAJE_CAPITAL = 0.50  # Usa el 50% de tu saldo
-CALLBACK_RATE = 2.0        # Escudo 1: Trailing Stop al 2.0%
-# ---------------------------------------------------------
+RIESGO_CUENTA_PCT = 0.05   # Pierdes MÁXIMO el 5% de tus USDT totales si toca el Stop Loss
+DISTANCIA_SL_PCT = 0.05    # Stop Loss Súper Amplio al 5% de distancia (evita amagues)
+CALLBACK_RATE = 2.0        # Trailing Stop persiguiendo al 2.0% para asegurar ganancias
+# -----------------------------------------------------------
 
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_API_SECRET')
@@ -38,11 +39,11 @@ def webhook():
         qty_precision, price_precision = get_precision(symbol)
         client.futures_change_leverage(symbol=symbol, leverage=APALANCAMIENTO)
 
-        # 🧹 PASO CLAVE: Cancelar el Trailing Stop pendiente si TradingView manda una orden
+        # 🧹 Limpiar terreno
         client.futures_cancel_all_open_orders(symbol=symbol)
 
-        quantity = 0
         current_price = float(client.futures_symbol_ticker(symbol=symbol)['price'])
+        quantity = 0
 
         if action in ['BUY', 'SELL']:
             balances = client.futures_account_balance()
@@ -51,34 +52,52 @@ def webhook():
             if usdt_balance <= 0:
                 raise ValueError("No hay saldo USDT disponible.")
 
-            raw_qty = (usdt_balance * PORCENTAJE_CAPITAL * APALANCAMIENTO) / current_price
+            # --- LA FÓRMULA DE WALL STREET ---
+            riesgo_usdt = usdt_balance * RIESGO_CUENTA_PCT
+            distancia_sl_precio = current_price * DISTANCIA_SL_PCT
+            
+            raw_qty = riesgo_usdt / distancia_sl_precio
             quantity = round(raw_qty, qty_precision)
 
-        # EJECUCIÓN
+            print(f"🧮 CALCULO PRO: Saldo={usdt_balance:.2f} | Riesgo Permitido={riesgo_usdt:.2f} USDT | Comprando {quantity} XRP", flush=True)
+
+        # --- EJECUCIÓN CON TRIPLE BLINDAJE ---
         if action == 'BUY':
+            sl_price = round(current_price * (1 - DISTANCIA_SL_PCT), price_precision)
+            
+            # 1. Entrar al mercado
             client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
+            # 2. Escudo de Vida (Stop Loss Amplio Fijo)
+            client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price, quantity=quantity, reduceOnly=True)
+            # 3. Escudo de Ganancias (Trailing Stop Dinámico)
             client.futures_create_order(symbol=symbol, side=SIDE_SELL, type='TRAILING_STOP_MARKET', callbackRate=CALLBACK_RATE, quantity=quantity, reduceOnly=True)
-            print(f"✅ LONG ABIERTO Y BLINDADO (Trailing al {CALLBACK_RATE}%)", flush=True)
+            
+            print(f"✅ LONG ULTRA PRO: {quantity} XRP. 🛡️ SL Fijo en {sl_price} | 🏄‍♂️ Trailing al {CALLBACK_RATE}%", flush=True)
 
         elif action == 'SELL':
+            sl_price = round(current_price * (1 + DISTANCIA_SL_PCT), price_precision)
+            
+            # 1. Entrar al mercado
             client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
+            # 2. Escudo de Vida (Stop Loss Amplio Fijo)
+            client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price, quantity=quantity, reduceOnly=True)
+            # 3. Escudo de Ganancias (Trailing Stop Dinámico)
             client.futures_create_order(symbol=symbol, side=SIDE_BUY, type='TRAILING_STOP_MARKET', callbackRate=CALLBACK_RATE, quantity=quantity, reduceOnly=True)
-            print(f"✅ SHORT ABIERTO Y BLINDADO (Trailing al {CALLBACK_RATE}%)", flush=True)
+            
+            print(f"✅ SHORT ULTRA PRO: {quantity} XRP. 🛡️ SL Fijo en {sl_price} | 🏄‍♂️ Trailing al {CALLBACK_RATE}%", flush=True)
 
         elif action == 'CLOSE_LONG':
-            # Escudo 2: Cierra por cambio de estructura en el indicador
             client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=float(data.get('quantity', 0)), reduceOnly=True)
-            print(f"🛑 LONG CERRADO por cambio de estructura en TradingView", flush=True)
+            print(f"🛑 LONG CERRADO por TradingView", flush=True)
 
         elif action == 'CLOSE_SHORT':
-            # Escudo 2: Cierra por cambio de estructura en el indicador
             client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=float(data.get('quantity', 0)), reduceOnly=True)
-            print(f"🛑 SHORT CERRADO por cambio de estructura en TradingView", flush=True)
+            print(f"🛑 SHORT CERRADO por TradingView", flush=True)
 
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        print(f"❌ INFO: {str(e)}", flush=True) # Cambiado a INFO porque rechazos de ReduceOnly son normales aquí
+        print(f"❌ INFO/ERROR: {str(e)}", flush=True)
         return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
