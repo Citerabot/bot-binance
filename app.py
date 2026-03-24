@@ -1,4 +1,4 @@
-import os, json, urllib.request, urllib.parse, math
+import os, json, urllib.request, urllib.parse, math, time
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
@@ -7,17 +7,22 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ==============================================================================
-# 🎮 PANEL DE CONTROL MODULAR (Configuración)
+# 🎮 CONFIGURACIÓN SUPREMA (PARÁMETROS QUANT)
 # ==============================================================================
 ESCUADRON = {
-    'LTCUSDT': {'apalancamiento': 5, 'riesgo_cuenta_pct': 0.05, 'distancia_sl_pct': 0.04, 'callback_rate': 1.5},
-    'XRPUSDT': {'apalancamiento': 5, 'riesgo_cuenta_pct': 0.05, 'distancia_sl_pct': 0.05, 'callback_rate': 2.0}
+    'LTCUSDT': {'apalancamiento': 5, 'riesgo_pct': 0.05, 'sl_pct': 0.04, 'trail_pct': 1.5},
+    'XRPUSDT': {'apalancamiento': 5, 'riesgo_pct': 0.05, 'sl_pct': 0.05, 'trail_pct': 2.0}
 }
 
-ACTIVAR_KILLZONES = True
-KILLZONES_UTC = [(7, 11), (12, 16)] # Londres y NY (UTC)
+# SEGURIDAD (Circuit Breaker)
+MAX_VOLATILIDAD_SUDDEN = 0.03  # 3% de movimiento brusco bloquea el bot
+LOCKOUT_SISTEMA = {"activo": False, "hora_inicio": 0}
+ULTIMOS_PRECIOS = {} # Memoria de volatilidad
 
-# Variables de Entorno
+ACTIVAR_KILLZONES = True
+KILLZONES_UTC = [(7, 11), (12, 16)] # Londres y NY
+
+# Credenciales
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_API_SECRET')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -26,7 +31,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 client = Client(API_KEY, API_SECRET)
 
 # ==============================================================================
-# 📡 MOTOR 1: COMUNICACIÓN (Telegram)
+# 📡 MOTOR 1: COMUNICACIÓN Y ALERTAS
 # ==============================================================================
 def enviar_telegram(mensaje):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
@@ -39,87 +44,97 @@ def enviar_telegram(mensaje):
         print(f"⚠️ Error Telegram: {e}")
 
 # ==============================================================================
-# 📐 MOTOR 2: MATEMÁTICAS Y RIESGO
+# 📊 MOTOR 2: AUDITORÍA FORENSE (Logs de Análisis)
 # ==============================================================================
-def get_precision(symbol):
-    info = client.futures_exchange_info()
-    for s in info['symbols']:
-        if s['symbol'] == symbol:
-            return int(s['quantityPrecision']), int(s['pricePrecision'])
-    return 0, 0
-
-def calcular_posicion(balance, precio, pct_riesgo, pct_sl, precision):
-    riesgo_usd = balance * pct_riesgo
-    distancia_precio = precio * pct_sl
-    raw_qty = riesgo_usd / distancia_precio
-    factor = 10 ** precision
-    return math.floor(raw_qty * factor) / factor
-
-# ==============================================================================
-# 📊 MOTOR 3: INTELIGENCIA DE DATOS (Logs Estructurados)
-# ==============================================================================
-def registrar_dato(moneda, señal, estado, precio, resultado):
+def registrar_forense(moneda, señal, estado, precio, detalle):
     fecha = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    # Formato: FECHA | MONEDA | SEÑAL | ESTADO | PRECIO | RESULTADO
-    log_line = f"{fecha} | {moneda} | {señal} | {estado} | {precio} | {resultado}"
+    # FORMATO: FECHA | MONEDA | SEÑAL | ESTADO | PRECIO | JUSTIFICACION_MATEMATICA
+    log_line = f"{fecha} | {moneda} | {señal} | {estado} | ${precio} | {detalle}"
     print(log_line, flush=True)
     return log_line
 
 # ==============================================================================
-# ⚔️ MOTOR 4: EJECUCIÓN TÁCTICA
+# 🛡️ MOTOR 3: PROTECCIÓN DE CAPITAL (Circuit Breaker)
+# ==============================================================================
+def verificar_seguridad(symbol, precio_actual):
+    global LOCKOUT_SISTEMA
+    
+    # 1. ¿Estamos en bloqueo de pánico? (Dura 1 hora)
+    if LOCKOUT_SISTEMA["activo"]:
+        if time.time() - LOCKOUT_SISTEMA["hora_inicio"] < 3600:
+            return False, "SISTEMA_BLOQUEADO_POR_PANICO"
+        else:
+            LOCKOUT_SISTEMA["activo"] = False # Reset tras una hora
+
+    # 2. Detección de Flash Crash / Anomalía
+    if symbol in ULTIMOS_PRECIOS:
+        cambio_pct = abs(precio_actual - ULTIMOS_PRECIOS[symbol]) / ULTIMOS_PRECIOS[symbol]
+        if cambio_pct > MAX_VOLATILIDAD_SUDDEN:
+            LOCKOUT_SISTEMA = {"activo": True, "hora_inicio": time.time()}
+            msg = f"🚨 CIRCUIT BREAKER ACTIVADO en {symbol}\nDetectado movimiento de {cambio_pct*100:.2f}%\nBot bloqueado por seguridad."
+            enviar_telegram(msg)
+            return False, f"FLASH_CRASH_DETECTADO_{cambio_pct:.4f}"
+    
+    ULTIMOS_PRECIOS[symbol] = precio_actual
+    return True, "SEGURIDAD_OK"
+
+# ==============================================================================
+# ⚔️ MOTOR 4: EJECUCIÓN CUÁNTICA
 # ==============================================================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = json.loads(request.get_data(as_text=True))
-        action = data.get('action', '').upper()
-        symbol = data.get('symbol', '').upper()
+        action, symbol = data.get('action', '').upper(), data.get('symbol', '').upper()
         
         if symbol not in ESCUADRON:
             return jsonify({"status": "error", "message": "Simbolo no autorizado"}), 400
 
         conf = ESCUADRON[symbol]
-        precio = float(client.futures_symbol_ticker(symbol=symbol)['price'])
-        q_prec, p_prec = get_precision(symbol)
+        ticker = client.futures_symbol_ticker(symbol=symbol)
+        precio = float(ticker['price'])
 
-        # 1. Filtro de Killzone
+        # --- CAPA 1: CIRCUIT BREAKER ---
+        seguro_ok, motivo_seguridad = verificar_seguridad(symbol, precio)
+        if not seguro_ok:
+            registrar_forense(symbol, action, "RECHAZADO", precio, motivo_seguridad)
+            return jsonify({"status": "panic_lockout"}), 403
+
+        # --- CAPA 2: FILTRO DE HORARIO ---
         if ACTIVAR_KILLZONES and action in ['BUY', 'SELL']:
-            hora_actual = datetime.utcnow().hour
-            if not any(i <= hora_actual < f for i, f in KILLZONES_UTC):
-                registrar_dato(symbol, action, "IGNORADO", precio, "FUERA_DE_HORARIO")
-                return jsonify({"status": "ignored"}), 200
+            h_utc = datetime.utcnow().hour
+            if not any(i <= h_utc < f for i, f in KILLZONES_UTC):
+                registrar_forense(symbol, action, "IGNORADO", precio, "FUERA_DE_KILLZONE_HORARIA")
+                return jsonify({"status": "out_of_hours"}), 200
 
-        # 2. Gestión de Órdenes
-        client.futures_change_leverage(symbol=symbol, leverage=conf['apalancamiento'])
-        client.futures_cancel_all_open_orders(symbol=symbol)
-
+        # --- CAPA 3: EJECUCIÓN ---
         if action in ['BUY', 'SELL']:
-            bal = next(float(a['balance']) for a in client.futures_account_balance() if a['asset'] == 'USDT')
-            qty = calcular_posicion(bal, precio, conf['riesgo_cuenta_pct'], conf['distancia_sl_pct'], q_prec)
+            # Configuración de cuenta
+            client.futures_change_leverage(symbol=symbol, leverage=conf['apalancamiento'])
+            client.futures_cancel_all_open_orders(symbol=symbol)
             
-            side = SIDE_BUY if action == 'BUY' else SIDE_SELL
-            opp_side = SIDE_SELL if action == 'BUY' else SIDE_BUY
-            sl_price = round(precio * (1 - conf['distancia_sl_pct']) if action == 'BUY' else precio * (1 + conf['distancia_sl_pct']), p_prec)
+            # Cálculo de Posición (Gestión de Riesgo)
+            bal = next(float(a['balance']) for a in client.futures_account_balance() if a['asset'] == 'USDT')
+            q_prec = next(int(s['quantityPrecision']) for s in client.futures_exchange_info()['symbols'] if s['symbol'] == symbol)
+            p_prec = next(int(s['pricePrecision']) for s in client.futures_exchange_info()['symbols'] if s['symbol'] == symbol)
+            
+            qty = math.floor((bal * conf['riesgo_pct'] / (precio * conf['sl_pct'])) * (10**q_prec)) / (10**q_prec)
+            sl_price = round(precio * (1 - conf['sl_pct']) if action == 'BUY' else precio * (1 + conf['sl_pct']), p_prec)
 
-            # Ejecutar Mercado
+            # ÓRDENES
+            side, opp = (SIDE_BUY, SIDE_SELL) if action == 'BUY' else (SIDE_SELL, SIDE_BUY)
             client.futures_create_order(symbol=symbol, side=side, type=ORDER_TYPE_MARKET, quantity=qty)
-            # Escudo 1: Stop Loss
-            client.futures_create_order(symbol=symbol, side=opp_side, type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price, quantity=qty, reduceOnly=True)
-            # Escudo 2: Trailing Stop
-            client.futures_create_order(symbol=symbol, side=opp_side, type='TRAILING_STOP_MARKET', callbackRate=conf['callback_rate'], quantity=qty, reduceOnly=True)
+            client.futures_create_order(symbol=symbol, side=opp, type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price, quantity=qty, reduceOnly=True)
+            client.futures_create_order(symbol=symbol, side=opp, type='TRAILING_STOP_MARKET', callbackRate=conf['trail_pct'], quantity=qty, reduceOnly=True)
 
-            msg = f"🚀 {action} {symbol}\n💰 Qty: {qty}\n🛡️ SL: {sl_price}\n🌊 Trail: {conf['callback_rate']}%"
-            enviar_telegram(msg)
-            registrar_dato(symbol, action, "EJECUTADO", precio, f"OPEN_{action}")
-
-        elif 'CLOSE' in action:
-            # Aquí se puede agregar lógica para cerrar posiciones específicas si es necesario
-            registrar_dato(symbol, action, "CERRADO", precio, "EXIT_SIGNAL")
+            justificacion = f"Riesgo:{conf['riesgo_pct']*100}% | Bal:${bal:.2f} | SL:{conf['sl_pct']*100}%"
+            registrar_forense(symbol, action, "EJECUTADO", precio, justificacion)
+            enviar_telegram(f"⚡ {action} {symbol}\n✅ Ejecutado exitosamente.\n{justificacion}")
 
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        registrar_dato("ERROR", "SYSTEM", "CRASH", 0, str(e))
+        registrar_forense("SYSTEM", "ERROR", "CRASH", 0, str(e))
         return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
