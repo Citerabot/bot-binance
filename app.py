@@ -1,4 +1,4 @@
-import os, json, urllib.request
+import os, json, urllib.request, math
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
@@ -6,19 +6,20 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN ULTRA PRO + KILLZONES ---
-APALANCAMIENTO = 5
-RIESGO_CUENTA_PCT = 0.05   
-DISTANCIA_SL_PCT = 0.05    
-CALLBACK_RATE = 2.0        
+# ==============================================================================
+# 🧠 CEREBRO DEL ESCUADRÓN (CONFIGURACIÓN INDIVIDUAL POR ACTIVO)
+# ==============================================================================
+ESCUADRON = {
+    'BTCUSDT': {'apalancamiento': 5, 'riesgo_cuenta_pct': 0.05, 'distancia_sl_pct': 0.025, 'callback_rate': 1.0},
+    'ETHUSDT': {'apalancamiento': 5, 'riesgo_cuenta_pct': 0.05, 'distancia_sl_pct': 0.035, 'callback_rate': 1.5},
+    'LTCUSDT': {'apalancamiento': 5, 'riesgo_cuenta_pct': 0.05, 'distancia_sl_pct': 0.040, 'callback_rate': 1.5},
+    'XRPUSDT': {'apalancamiento': 5, 'riesgo_cuenta_pct': 0.05, 'distancia_sl_pct': 0.050, 'callback_rate': 2.0}
+}
 
-# ⏱️ FILTRO DE TIEMPO (Smart Money Killzones)
+# ⏱️ FILTRO INSTITUCIONAL (Killzones)
 ACTIVAR_KILLZONES = True
-# Horas en formato UTC (Servidor). 
-# Rango 1 (Londres): 07:00 a 11:00 UTC -> (02:00 AM a 06:00 AM UTC-5)
-# Rango 2 (NY): 12:00 a 16:00 UTC -> (07:00 AM a 11:00 AM UTC-5)
-KILLZONES_UTC = [(7, 11), (12, 16)]
-# -------------------------------------------
+KILLZONES_UTC = [(7, 11), (12, 16)] # Londres y Nueva York (Hora Servidor UTC)
+# ==============================================================================
 
 API_KEY = os.environ.get('BINANCE_API_KEY')
 API_SECRET = os.environ.get('BINANCE_API_SECRET')
@@ -31,12 +32,17 @@ def get_precision(symbol):
             return int(s['quantityPrecision']), int(s['pricePrecision'])
     return 0, 0
 
+def redondear_hacia_abajo(numero, decimales):
+    factor = 10 ** decimales
+    return math.floor(numero * factor) / factor
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     raw_data = request.get_data(as_text=True)
-    print(f"📥 SEÑAL RECIBIDA: {raw_data}", flush=True)
+    print(f"\n[{datetime.utcnow().strftime('%H:%M:%S UTC')}] 📥 SEÑAL RECIBIDA: {raw_data}", flush=True)
 
     try:
+        # Extraer JSON
         inicio = raw_data.find('{')
         fin = raw_data.rfind('}') + 1
         data = json.loads(raw_data[inicio:fin])
@@ -44,21 +50,29 @@ def webhook():
         action = data.get('action', '').upper()
         symbol = data.get('symbol', '').upper()
         
-        qty_precision, price_precision = get_precision(symbol)
-        client.futures_change_leverage(symbol=symbol, leverage=APALANCAMIENTO)
+        # 🛡️ Filtro 1: ¿Pertenece al Escuadrón?
+        if symbol not in ESCUADRON:
+            print(f"⚠️ {symbol} no está en el Escuadrón. Ignorando.", flush=True)
+            return jsonify({"status": "ignored", "reason": "Symbol not assigned"}), 200
 
-        # ⏱️ VALIDACIÓN DE HORARIO (Solo restringe entradas, no salidas)
+        config = ESCUADRON[symbol]
+        qty_precision, price_precision = get_precision(symbol)
+        
+        # Ajustar Apalancamiento automáticamente
+        client.futures_change_leverage(symbol=symbol, leverage=config['apalancamiento'])
+
+        # ⏱️ Filtro 2: Killzones (Solo restringe aperturas, NUNCA cierres)
         if ACTIVAR_KILLZONES and action in ['BUY', 'SELL']:
-            hora_utc_actual = datetime.utcnow().hour
-            en_horario = any(inicio <= hora_utc_actual < fin for inicio, fin in KILLZONES_UTC)
-            
+            hora_utc = datetime.utcnow().hour
+            en_horario = any(inicio <= hora_utc < fin for inicio, fin in KILLZONES_UTC)
             if not en_horario:
-                print(f"⏳ FUERA DE KILLZONE (Hora Servidor: {hora_utc_actual}:00 UTC). Señal {action} ignorada para evitar lateralidad.", flush=True)
+                print(f"⏳ FUERA DE KILLZONE ({hora_utc}:00 UTC). Señal de {symbol} ignorada.", flush=True)
                 return jsonify({"status": "ignored", "reason": "Outside Volatility Killzone"}), 200
 
-        # 🧹 Limpiar terreno si es una nueva entrada válida o un cierre
+        # 🧹 Filtro 3: Limpiar el campo de batalla de esta moneda
         client.futures_cancel_all_open_orders(symbol=symbol)
 
+        # 🧮 Lógica Matemática de Riesgo
         current_price = float(client.futures_symbol_ticker(symbol=symbol)['price'])
         quantity = 0
 
@@ -67,40 +81,44 @@ def webhook():
             usdt_balance = next((float(asset['balance']) for asset in balances if asset['asset'] == 'USDT'), 0)
             
             if usdt_balance <= 0:
-                raise ValueError("No hay saldo USDT disponible.")
+                raise ValueError("Cuenta en $0. No hay USDT para operar.")
 
-            riesgo_usdt = usdt_balance * RIESGO_CUENTA_PCT
-            distancia_sl_precio = current_price * DISTANCIA_SL_PCT
+            # Fórmula Quant: (Capital * %Riesgo) / (Precio * %Distancia_SL)
+            riesgo_usdt = usdt_balance * config['riesgo_cuenta_pct']
+            distancia_sl_precio = current_price * config['distancia_sl_pct']
             raw_qty = riesgo_usdt / distancia_sl_precio
-            quantity = round(raw_qty, qty_precision)
+            
+            # Redondeo estricto hacia abajo para que Binance no rechace por exceso de decimales
+            quantity = redondear_hacia_abajo(raw_qty, qty_precision)
+            print(f"🧮 {symbol} | Capital: {usdt_balance:.2f} | Riesgo: {riesgo_usdt:.2f} USDT | Calculado: {quantity} tokens", flush=True)
 
-        # --- EJECUCIÓN ---
+        # ⚔️ EJECUCIÓN TÁCTICA ⚔️
         if action == 'BUY':
-            sl_price = round(current_price * (1 - DISTANCIA_SL_PCT), price_precision)
+            sl_price = round(current_price * (1 - config['distancia_sl_pct']), price_precision)
             client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
             client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price, quantity=quantity, reduceOnly=True)
-            client.futures_create_order(symbol=symbol, side=SIDE_SELL, type='TRAILING_STOP_MARKET', callbackRate=CALLBACK_RATE, quantity=quantity, reduceOnly=True)
-            print(f"✅ LONG DENTRO DE KILLZONE: {quantity} XRP. 🛡️ SL Fijo en {sl_price} | 🏄‍♂️ Trailing al {CALLBACK_RATE}%", flush=True)
+            client.futures_create_order(symbol=symbol, side=SIDE_SELL, type='TRAILING_STOP_MARKET', callbackRate=config['callback_rate'], quantity=quantity, reduceOnly=True)
+            print(f"🟢 LONG {symbol} EJECUTADO. Cant: {quantity} | SL: {sl_price} | Trail: {config['callback_rate']}%", flush=True)
 
         elif action == 'SELL':
-            sl_price = round(current_price * (1 + DISTANCIA_SL_PCT), price_precision)
+            sl_price = round(current_price * (1 + config['distancia_sl_pct']), price_precision)
             client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
             client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price, quantity=quantity, reduceOnly=True)
-            client.futures_create_order(symbol=symbol, side=SIDE_BUY, type='TRAILING_STOP_MARKET', callbackRate=CALLBACK_RATE, quantity=quantity, reduceOnly=True)
-            print(f"✅ SHORT DENTRO DE KILLZONE: {quantity} XRP. 🛡️ SL Fijo en {sl_price} | 🏄‍♂️ Trailing al {CALLBACK_RATE}%", flush=True)
+            client.futures_create_order(symbol=symbol, side=SIDE_BUY, type='TRAILING_STOP_MARKET', callbackRate=config['callback_rate'], quantity=quantity, reduceOnly=True)
+            print(f"🔴 SHORT {symbol} EJECUTADO. Cant: {quantity} | SL: {sl_price} | Trail: {config['callback_rate']}%", flush=True)
 
         elif action == 'CLOSE_LONG':
             client.futures_create_order(symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=float(data.get('quantity', 0)), reduceOnly=True)
-            print(f"🛑 LONG CERRADO", flush=True)
+            print(f"🛑 LONG {symbol} CERRADO MANUALMENTE POR INDICADOR", flush=True)
 
         elif action == 'CLOSE_SHORT':
             client.futures_create_order(symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=float(data.get('quantity', 0)), reduceOnly=True)
-            print(f"🛑 SHORT CERRADO", flush=True)
+            print(f"🛑 SHORT {symbol} CERRADO MANUALMENTE POR INDICADOR", flush=True)
 
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        print(f"❌ INFO/ERROR: {str(e)}", flush=True)
+        print(f"❌ INFO/ERROR ({symbol if 'symbol' in locals() else 'System'}): {str(e)}", flush=True)
         return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
